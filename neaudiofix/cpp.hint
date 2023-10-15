@@ -1,0 +1,2 @@
+#define NEAUDIOFIX_API __declspec(dllexport)
+#define NEAUDIOFIX_API __declspec(dllimport)
