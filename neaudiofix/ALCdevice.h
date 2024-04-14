@@ -27,6 +27,7 @@ struct ALCdevice_struct;
 
 struct ALCdevice_struct_vtbl {
 	void(__stdcall* destructor)(ALCdevice_struct* This);
+	void(__stdcall* ReorderChannels)(ALCdevice_struct* This);
 	void(__stdcall* openPlayback)(ALCdevice_struct* This, char* _pDeviceName);
 	void(__stdcall* closePlayback)(ALCdevice_struct* This);
 	void(__stdcall* resetPlayback)(ALCdevice_struct* This);
@@ -60,9 +61,13 @@ public:
 	Mutex* m_pTermMutex;
 };
 
+static constexpr int QUADRANT_NUM = 128;
+static constexpr int LUT_NUM = 4 * QUADRANT_NUM;
+
 struct ALCdevice_struct {
 #ifndef __GHIDRA__
 	virtual ~ALCdevice_struct() = 0;
+	virtual void ReorderChannels() = 0;
 	virtual void openPlayback(const char *_pDeviceName) = 0;
 	virtual void closePlayback(void) = 0;
 	virtual void resetPlayback(void) = 0;
@@ -90,7 +95,7 @@ struct ALCdevice_struct {
 	ALint numChan;
 	ALfloat channelMatrix[Channel::OUTPUTCHANNELS][Channel::OUTPUTCHANNELS];
 	Channel speaker2Chan[Channel::OUTPUTCHANNELS];
-	ALfloat panningLUT[4608];
+	ALfloat panningLUT[Channel::OUTPUTCHANNELS * LUT_NUM];
 };
 
 struct ALCdevice_wasapi : public ALCdevice_struct {

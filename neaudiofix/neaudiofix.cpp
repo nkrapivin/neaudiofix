@@ -50,7 +50,102 @@ GetDefaultAudioEndpoint_t GetDefaultAudioEndpointTramp;
 
 bool NeInitOkay = false;
 
-bool isNeCall = false;
+struct
+NeMMNotificationClient : public IMMNotificationClient
+{
+private:
+    /* alignas(32) */ LONG refCount_;
+    NeComPtr<IMMDeviceEnumerator> enumerator_;
+    volatile bool didChange_;
+
+public:
+    // NeComPtr copying by value will automatically call AddRef for us
+    NeMMNotificationClient(NeComPtr<IMMDeviceEnumerator> pE) : refCount_(1), enumerator_(pE), didChange_(false) {
+        if (enumerator_) {
+            enumerator_->RegisterEndpointNotificationCallback(this);
+        }
+    }
+
+    virtual ~NeMMNotificationClient() {
+        // .release will automatically be called for us in NeComPtr's dtor
+        if (enumerator_) {
+            enumerator_->UnregisterEndpointNotificationCallback(this);
+        }
+
+        didChange_ = false; // just in case
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, _COM_Outptr_ void __RPC_FAR* __RPC_FAR* ppvObject) override {
+        if (ppvObject == nullptr) {
+            return E_POINTER;
+        }
+
+        if (riid == IID_IUnknown) {
+            AddRef();
+            *ppvObject = static_cast<IUnknown*>(this);
+        }
+        else if (riid == IID_IMMNotificationClient) {
+            AddRef();
+            *ppvObject = static_cast<IMMNotificationClient*>(this);
+        }
+        else {
+            *ppvObject = nullptr;
+            return E_NOINTERFACE;
+        }
+
+        return S_OK;
+    }
+
+    virtual ULONG STDMETHODCALLTYPE AddRef(void) override {
+        return static_cast<ULONG>(InterlockedIncrement(&refCount_));
+    }
+
+    virtual ULONG STDMETHODCALLTYPE Release(void) override {
+        const LONG newRefCount = InterlockedDecrement(&refCount_);
+        if (0 == newRefCount) {
+            delete this;
+        }
+        return static_cast<ULONG>(newRefCount);
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(_In_ LPCWSTR pwstrDeviceId, _In_ DWORD dwNewState) override {
+        return S_OK;
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE OnDeviceAdded(_In_ LPCWSTR pwstrDeviceId) override {
+        return S_OK;
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE OnDeviceRemoved(_In_ LPCWSTR pwstrDeviceId) override {
+        return S_OK;
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(_In_ EDataFlow flow, _In_ ERole role, _In_opt_ LPCWSTR pwstrDefaultDeviceId) override {
+        if (flow == eRender && role == eConsole && pwstrDefaultDeviceId != nullptr && *pwstrDefaultDeviceId) {
+            // changed render+console device, set a flag so the game can reset the device
+            didChange_ = true;
+        }
+        return S_OK;
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(_In_ LPCWSTR pwstrDeviceId, _In_ const PROPERTYKEY key) override {
+        return S_OK;
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE DidDefaultDeviceChange(_Out_ LPBOOL lpOutDidDeviceChange) {
+        if (lpOutDidDeviceChange == nullptr) {
+            return E_POINTER;
+        }
+
+        *lpOutDidDeviceChange = didChange_;
+        didChange_ = false;
+        return S_OK;
+    }
+};
+
+NeComPtr<NeMMNotificationClient> g_pNotificationClient;
+
+volatile bool isNeCall = false;
 bool NeResetDevice() {
     isNeCall = true;
     HRESULT hr = g_pMMEnumerator->GetDefaultAudioEndpoint(
@@ -90,7 +185,7 @@ void NeApplyToAL() {
         return;
     }
 
-    if (ppAlutContext) {
+    if (ppAlutContext && *ppAlutContext) {
         NeTrace("reapplying playback state");
         auto dev = (*ppAlutContext)->_pDevice;
         dev->stopPlayback();
@@ -100,7 +195,7 @@ void NeApplyToAL() {
         NeTrace("waitthread status res=%lu", dwStatus);
         BOOL bOk = CloseHandle(thr->m_hThread);
         NeTrace("closehandle thr res=%d", bOk);
-        LeaveCriticalSection(thr->m_pTermMutex->criticalSection);
+        //LeaveCriticalSection(thr->m_pTermMutex->criticalSection);
         thr->m_hThread = nullptr;
         thr->m_errorCode = 0;
         thr->m_bTerminate = false;
@@ -144,7 +239,7 @@ std::string NeUtf16ToUtf8(LPCWSTR u16) {
     }
 
     size_t len = wcslen(u16);
-    if (len <= 0) {
+    if (len <= 0 || len > INT32_MAX) {
         return s;
     }
 
@@ -161,7 +256,7 @@ std::string NeUtf16ToUtf8(LPCWSTR u16) {
 HRESULT
 STDMETHODCALLTYPE
 NeGetDefaultAudioEndpoint(IMMDeviceEnumerator* This, EDataFlow dataFlow, ERole role, IMMDevice** ppEndpoint) {
-    if (!isNeCall && dataFlow == eRender && role == eConsole && ppEndpoint) {
+    if (!isNeCall && This != g_pMMEnumerator && dataFlow == eRender && role == eConsole && ppEndpoint) {
         /* this is probably GameMaker... */
         auto dev = NeGetDevice();
         NeTrace("GameMaker is requesting an audio device ptr, %p", dev);
@@ -174,6 +269,7 @@ NeGetDefaultAudioEndpoint(IMMDeviceEnumerator* This, EDataFlow dataFlow, ERole r
 
 const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
 const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
+const IID IID_IMMNotificationClient = __uuidof(IMMNotificationClient);
 
 constexpr unsigned char bany = '?';
 bool predSearch(unsigned char a, unsigned char b) {
@@ -221,6 +317,7 @@ bool NeAudioFixInit(void) {
         sizeof(modinfo)
     );
     if (!bOk) {
+        NeTrace("GetModuleInformation failed?!");
         return false;
     }
 
@@ -318,6 +415,8 @@ bool NeAudioFixInit(void) {
         NeTrace("MinHook EnableHook error %s", MH_StatusToString(mh));
         return false;
     }
+
+    *g_pNotificationClient.put_typed() = new NeMMNotificationClient(g_pMMEnumerator);
     
     NeTrace("done??");
     return 1;
@@ -349,6 +448,13 @@ NeExtern NeApi double NeCall neaudiofix_enum_devices(void) {
     if (FAILED(hr)) {
         NeTrace("getcount fail hr=%X", hr);
         return -3;
+    }
+
+    if (count == 0) {
+        // it makes no sense to allocate 0 bytes of memory
+        g_DevicesCount = 0;
+        g_pDevices.reset();
+        return 0;
     }
 
     g_pDevices = std::make_unique<NeComPtr<IMMDevice>[]>(count);
@@ -437,7 +543,7 @@ NeExtern NeApi double NeCall neaudiofix_enum_devices_select(double deviceIndex) 
 }
 
 NeExtern NeApi double NeCall neaudiofix_is_present(void) {
-    NeTrace("is present");
+    NeTrace("is present %d", int(NeInitOkay));
     return NeInitOkay;
 }
 
@@ -446,12 +552,22 @@ NeExtern NeApi double NeCall neaudiofix_periodic(void) {
         return 0;
     }
 
-    if (ppAlutContext) {
+    if (ppAlutContext && *ppAlutContext) {
         HANDLE hThread = (*ppAlutContext)->_pDevice->m_pThread->m_hThread;
         bool bIsRunning = hThread && WaitForSingleObject(hThread, 0) != WAIT_OBJECT_0;
 
+        if (!g_bDeviceForced) {
+            BOOL didDeviceChange = FALSE;
+            HRESULT hr = g_pNotificationClient->DidDefaultDeviceChange(&didDeviceChange);
+            if (SUCCEEDED(hr) && didDeviceChange) {
+                NeTrace("default device has been changed!");
+                NeSetNewDevice(NeComPtr<IMMDevice>());
+                return 1;
+            }
+        }
+
         if (!bIsRunning) {
-            NeTrace("playback thread has died, recovering...");
+            //NeTrace("playback thread has died, recovering...");
             NeApplyToAL();
         }
     }

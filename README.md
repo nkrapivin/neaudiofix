@@ -2,7 +2,7 @@
 
 A hook for GameMaker's `ALCdevice_wasapi` class to swap between multiple audio output devices on the fly.
 
-***Only works on the Windows 64-bit target, LTS 2022.0.1 or newer, VM or YYC.***
+***Only works on the Windows 64-bit target, LTS 2022.0.2 or newer, VM or YYC.***
 
 # Acknowledgements
 
